@@ -1,0 +1,48 @@
+{
+  "name": "dsh-session-scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Session scheduling for DSH: open a session in any project, message a running or stopped session (queue or steer), stop it, archive or restore it, and wait for it to finish.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/universe-st/dsh-session-scheduler.git"
+  },
+  "homepage": "https://github.com/universe-st/dsh-session-scheduler#readme",
+  "bugs": {
+    "url": "https://github.com/universe-st/dsh-session-scheduler/issues"
+  },
+  "author": "universe-st",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.2-rc.3 <0.3.0-0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "session",
+    "scheduler",
+    "orchestration",
+    "agent"
+  ],
+  "license": "MIT"
+}

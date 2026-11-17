@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "title": "Session scheduling",
+    "description": "Lets an agent drive other conversations: sessions_create opens a session in any project directory; sessions_send delivers a message to a running or stopped session (mode=queue waits for the current turn, mode=steer interrupts and injects it); sessions_stop cancels the turn that is running; sessions_archive and sessions_unarchive hide or restore a session; sessions_wait blocks until a session finishes a turn or asks for input and returns its last reply; sessions_list reads visible sessions with live status (running, idle, waiting for approval, queued messages) and resolves a title or id prefix. Session content and logs stay with DSH; the plugin copies nothing. Limitations: an archived session no longer appears in sessions_list, so it can only be restored by full id; sessions_stop keeps queued messages unless dropQueue is set; a target session cannot see the calling session's context, so messages must be self-contained. Disabling the plugin removes these tools; delivered messages and archived state stay as they are.",
+    "detail": "docs/DETAIL.md"
+  },
+  "tool": {
+    "list": "List visible sessions with live status",
+    "create": "Open a session in a project directory",
+    "send": "Message a running or stopped session",
+    "stop": "Stop the running turn of a session",
+    "archive": "Archive a session",
+    "unarchive": "Restore an archived session",
+    "wait": "Wait for a session to finish and return its reply"
+  }
+}

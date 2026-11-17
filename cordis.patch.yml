@@ -1,0 +1,5 @@
+# sessionScheduler：「会话调度」— 跨会话发起、投递、停止、归档与等待。
+- insert:
+    - id: sessionScheduler
+      name: dsh-session-scheduler
+      config: {}
