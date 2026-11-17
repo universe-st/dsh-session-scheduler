@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "会话调度",
-    "description": "让 agent 跨会话调度：用 sessions_create 在任意项目目录新开会话；用 sessions_send 给正在运行或已经停止的会话发消息（mode=queue 排队等当前回合结束，mode=steer 立即打断插入）；用 sessions_stop 停止正在执行的回合；用 sessions_archive / sessions_unarchive 归档与恢复会话；用 sessions_wait 等某个会话这一轮结束并取回它最后一条答复；sessions_list 列出可见会话及实时状态（运行中 / 空闲 / 在等确认 / 有排队消息）并支持按标题或 id 前缀定位。会话内容与会话日志仍由 DSH 自己保管，插件不复制、不落盘。限制：归档后的会话不再出现在 sessions_list 里，只能用完整 id 恢复；sessions_stop 默认保留队列消息，要一起清空需传 dropQueue；被调度的会话看不到发起方会话的上下文，消息需自包含。停用本插件后已投递的消息与归档状态保持不变，只是上述工具消失。",
+    "description": "让 agent 跨会话调度：用 sessions_create 在任意项目目录新开会话；用 sessions_send 给正在运行或已经停止的会话发消息（mode=queue 排队等当前回合结束，mode=steer 立即打断插入）；用 sessions_stop 停止正在执行的回合；用 sessions_archive / sessions_unarchive 归档与恢复会话；用 sessions_wait 等某个会话这一轮结束并取回它最后一条答复；用 sessions_read 只读地看任意会话的内容（默认从结尾、at:head 从开头、query 搜关键字从命中处、fromSeq 按事件序号往后读，可选包含工具调用行）；sessions_list 列出可见会话及实时状态并支持按标题或 id 前缀定位。会话内容与会话日志仍由 DSH 自己保管，插件不复制、不落盘。限制：归档后的会话不再出现在 sessions_list 里，只能用完整 id 恢复；sessions_stop 默认保留队列消息，要一起清空需传 dropQueue；被调度的会话看不到发起方会话的上下文，消息需自包含。停用本插件后已投递的消息与归档状态保持不变，只是上述工具消失。",
     "detail": "docs/DETAIL.zh.md"
   },
   "tool": {
@@ -11,6 +11,7 @@
     "stop": "停止会话正在执行的回合",
     "archive": "归档会话",
     "unarchive": "恢复已归档的会话",
-    "wait": "等会话这一轮结束并取回答复"
+    "wait": "等会话这一轮结束并取回答复",
+    "read": "读某个会话的内容"
   }
 }

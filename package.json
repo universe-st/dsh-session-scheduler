@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-scheduler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Session scheduling for DSH: open a session in any project, message a running or stopped session (queue or steer), stop it, archive or restore it, and wait for it to finish.",
   "type": "module",
@@ -44,5 +44,8 @@
     "orchestration",
     "agent"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  }
 }

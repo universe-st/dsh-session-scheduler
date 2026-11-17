@@ -36,6 +36,14 @@ const STATE_CONCURRENCY = 6
 const STOP_CONFIRM_MS = 15_000
 const WAIT_TOOL_TIMEOUT_MS = MAX_WAIT_MS + 60_000
 
+/** Reading: page budget and per-line caps for `sessions_read`. */
+const READ_PAGE_SIZE = 100
+const READ_MAX_PAGE_SIZE = 300
+const READ_MAX_PAGES = 40
+const READ_MAX_LINES = 100
+const READ_LINE_CHARS = 1_000
+const READ_TOOL_TIMEOUT_MS = 120_000
+
 /**
  * Register the scheduling tools on the mounting scope.
  * @param ctx - Cordis context of the plugin.
@@ -751,6 +759,254 @@ export function apply(ctx, config = {}) {
     },
   })
 
+  // ----------------------------------------------------------- session read
+
+  /**
+   * Read one Session log backwards from its newest page, collecting older pages
+   * until the caller's scan predicate stops it, the log is exhausted, or the page
+   * budget runs out.
+   *
+   * Paging contract (measured against the live Host, not guessed): a page without
+   * a cursor is anchored at the newest event; `beforeSeq` is EXCLUSIVE, so the next
+   * older page is requested with this page's smallest sequence; the response
+   * `cursor` is not a usable page cursor and must not be used for paging.
+   * @param sessionId - target session
+   * @param signal - cancellation
+   * @param options - page size, page budget, and a per-batch stop predicate
+   * @returns {Promise<{records: any[], moreBefore: boolean, pages: number}>} records are chronological
+   */
+  async function readBackwards(sessionId, signal, options = {}) {
+    const service = controller()
+    const address = { kind: 'session', sessionId }
+    const pageSize = options.pageSize ?? READ_PAGE_SIZE
+    const maxPages = options.maxPages ?? READ_MAX_PAGES
+    const scanBatch = options.scanBatch
+    let records = []
+    let beforeSeq
+    let moreBefore = false
+    let pages = 0
+    for (;;) {
+      if (pages >= maxPages) break
+      if (signal?.aborted) break
+      pages += 1
+      const page = await service.events({
+        address,
+        ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        maxMessages: pageSize,
+      }, signal)
+      const batch = Array.isArray(page?.records) ? page.records : []
+      moreBefore = page?.hasMore === true
+      if (batch.length === 0) break
+      const seqs = batch.map(seqOf).filter(value => Number.isFinite(value))
+      if (seqs.length === 0) break
+      const earliest = Math.min(...seqs)
+      records = mergeRecords(batch, records)
+      // No progress means the page did not move earlier: stop instead of looping.
+      if (beforeSeq !== undefined && earliest >= beforeSeq) break
+      beforeSeq = earliest
+      if (scanBatch && scanBatch(batch, records)) break
+      if (!moreBefore) break
+    }
+    return { records, moreBefore, pages }
+  }
+
+  /**
+   * Project Session events onto the lines a reader cares about.
+   * @param records - chronological Session history records
+   * @param options - whether to include tool traffic, and the per-line character cap
+   * @returns {Array<{seq: number, role: string, text: string}>} readable lines
+   */
+  function messageLines(records, options = {}) {
+    const includeTools = options.includeTools === true
+    const maxChars = options.maxChars ?? READ_LINE_CHARS
+    const lines = []
+    for (const entry of records) {
+      const event = entry?.event ?? entry
+      const type = String(event?.type ?? '')
+      const seq = Number(event?.seq ?? 0)
+      if (type === 'user/message' || type === 'assistant/message') {
+        // A user message carries its content array directly; an assistant message wraps it.
+        const content = event?.data?.message?.content ?? event?.data?.content
+        const text = textOfContent(content, maxChars)
+        if (!text) continue
+        // A `user/message` whose source is not the user is injected context (memory
+        // blocks, runtime reminders); label it so readers do not mistake it for speech.
+        const sourceKind = String(event?.data?.source?.kind ?? 'user')
+        const role = type === 'assistant/message'
+          ? 'assistant'
+          : sourceKind === 'user'
+            ? 'user'
+            : `context:${sourceKind.replace(/^plugin:/, '')}`
+        lines.push({ seq, role, text })
+        continue
+      }
+      if (!includeTools) continue
+      if (type === 'tool/call') {
+        const name = String(event?.data?.name ?? 'tool')
+        const args = shorten(String(event?.data?.arguments ?? ''), 200)
+        lines.push({ seq, role: 'tool-call', text: `${name} ${args}`.trim() })
+      } else if (type === 'tool/result') {
+        const text = textOfContent(event?.data?.message?.content, maxChars)
+        if (text) lines.push({ seq, role: 'tool-result', text })
+      }
+    }
+    return lines
+  }
+
+  tool({
+    name: 'sessions_read',
+    description:
+      '读一个会话的内容（只读，不会让它跑起来）。默认读**最后**一批消息；`at: "head"` 从开头读；'
+      + '`query` 搜关键字，从命中那条往后读；`fromSeq` 直接给事件序号（上次结果里每条都带 `seq=`）从那里往后读。'
+      + '返回逐条消息（序号 + 角色 + 正文）以及前后是否还有更多。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sessionId'],
+      properties: {
+        sessionId: { type: 'string', description: '目标会话：id、id 前缀或标题。' },
+        at: {
+          type: 'string',
+          enum: ['tail', 'head'],
+          description: '从尾还是从头读，默认 tail（最近的）。给了 query 或 fromSeq 时忽略。',
+        },
+        query: { type: 'string', description: '搜索关键字（大小写不敏感的子串），从最近的一次命中那条开始往后读。' },
+        fromSeq: { type: 'integer', description: '从该事件序号开始往后读，序号取自上一次结果里的 seq=。' },
+        limit: { type: 'integer', description: '最多返回多少条消息，默认 20，最大 100。' },
+        context: { type: 'integer', description: 'query/fromSeq 命中点之前额外带几条上下文，默认 0。' },
+        includeTools: { type: 'boolean', description: '把工具调用与工具结果也列为行，默认 false（只列用户与助手消息）。只有工具调用、没有文字回复的助手步进不会单独成行。' },
+        maxChars: { type: 'integer', description: `每条消息最多显示多少字，默认 ${READ_LINE_CHARS}。` },
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string' },
+          title: { type: 'string' },
+          cwd: { type: 'string' },
+          at: { type: 'string' },
+          matched: { type: 'boolean' },
+          query: { type: 'string' },
+          from_seq: { type: 'integer' },
+          last_seq: { type: 'integer' },
+          pages: { type: 'integer' },
+          scanned: { type: 'integer' },
+          more_before: { type: 'boolean' },
+          more_after: { type: 'boolean' },
+          messages: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                seq: { type: 'integer' },
+                role: { type: 'string' },
+                text: { type: 'string' },
+              },
+              required: ['seq', 'role', 'text'],
+              additionalProperties: true,
+            },
+          },
+        },
+        required: ['session_id', 'at', 'scanned', 'more_before', 'more_after', 'messages'],
+        additionalProperties: true,
+      },
+      render: (_args, value) => [{ type: 'text', text: renderRead(value) }],
+    },
+    timeoutMs: READ_TOOL_TIMEOUT_MS,
+    async execute(args, exec) {
+      const input = asObject(args)
+      const signal = exec?.signal ?? lifecycle.signal
+      const sessionId = await resolveSessionId(input.sessionId, signal)
+      const limit = clampInt(input.limit, 1, READ_MAX_LINES, 20)
+      const context = clampInt(input.context, 0, 20, 0)
+      const maxChars = clampInt(input.maxChars, 100, 8_000, READ_LINE_CHARS)
+      const includeTools = input.includeTools === true
+      const query = typeof input.query === 'string' && input.query.trim() ? input.query.trim() : ''
+      const fromSeq = Number.isFinite(Number(input.fromSeq)) ? Math.trunc(Number(input.fromSeq)) : 0
+      const wantsHead = input.at === 'head' && !query && !fromSeq
+      const pageSize = Math.min(Math.max(limit * 3, READ_PAGE_SIZE), READ_MAX_PAGE_SIZE)
+
+      /** @type {string} */
+      let mode = query ? 'search' : fromSeq > 0 ? 'fromSeq' : wantsHead ? 'head' : 'tail'
+      let matched = false
+      const linesOf = records => messageLines(records, { includeTools, maxChars })
+
+      let window
+      if (mode === 'tail') {
+        window = await readBackwards(sessionId, signal, { pageSize, maxPages: 1 })
+      } else if (mode === 'head') {
+        window = await readBackwards(sessionId, signal, { pageSize, maxPages: READ_MAX_PAGES })
+      } else if (mode === 'fromSeq') {
+        window = await readBackwards(sessionId, signal, {
+          pageSize,
+          maxPages: READ_MAX_PAGES,
+          scanBatch: batch => batch.some(entry => Number((entry?.event ?? entry)?.seq ?? 0) <= fromSeq),
+        })
+      } else {
+        const needle = query.toLowerCase()
+        window = await readBackwards(sessionId, signal, {
+          pageSize,
+          maxPages: READ_MAX_PAGES,
+          scanBatch: batch => linesOf(batch).some(line => line.text.toLowerCase().includes(needle)),
+        })
+      }
+
+      const all = linesOf(window.records)
+      let start = 0
+      if (mode === 'tail') {
+        start = Math.max(0, all.length - limit)
+      } else if (mode === 'head') {
+        start = 0
+      } else if (mode === 'fromSeq') {
+        const found = all.findIndex(line => line.seq >= fromSeq)
+        if (found < 0) {
+          mode = 'beyond'
+          start = all.length
+        } else {
+          start = Math.max(0, found - context)
+        }
+      } else {
+        const needle = query.toLowerCase()
+        let hit = -1
+        for (let index = all.length - 1; index >= 0; index -= 1) {
+          if (all[index].text.toLowerCase().includes(needle)) {
+            hit = index
+            break
+          }
+        }
+        if (hit < 0) {
+          matched = false
+          mode = 'search-miss'
+          start = all.length
+        } else {
+          matched = true
+          start = Math.max(0, hit - context)
+        }
+      }
+
+      const messages = mode === 'search-miss' || mode === 'beyond' ? [] : all.slice(start, start + limit)
+      const moreBefore = mode === 'search-miss' ? window.moreBefore : start > 0 || window.moreBefore
+      const moreAfter = start + messages.length < all.length
+      const rows = await listRows(signal).catch(() => [])
+      const row = rows.find(item => String(item.sessionId) === sessionId)
+      return {
+        session_id: sessionId,
+        ...(row ? { title: titleOf(row) || path.basename(String(row.cwd ?? sessionId)), cwd: String(row.cwd ?? '') } : {}),
+        at: mode === 'search-miss' ? 'search-miss' : mode,
+        matched,
+        ...(query ? { query } : {}),
+        ...(fromSeq > 0 ? { from_seq: fromSeq } : {}),
+        pages: window.pages,
+        ...(all.length ? { last_seq: all[all.length - 1].seq } : {}),
+        scanned: all.length,
+        more_before: moreBefore,
+        more_after: moreAfter,
+        messages,
+      }
+    },
+  })
+
   // ------------------------------------------------------------ session ops
 
   /**
@@ -824,6 +1080,94 @@ export function apply(ctx, config = {}) {
 }
 
 // ---------------------------------------------------------------- rendering
+
+/**
+ * @param entry - Session history record or bare event
+ * @returns {number} event sequence
+ */
+function seqOf(entry) {
+  return Number((entry?.event ?? entry)?.seq ?? 0)
+}
+
+/**
+ * Prepend an older page to an already collected window, dropping sequences the
+ * window already holds.
+ * @param batch - older page records, chronological
+ * @param collected - newer records already collected, chronological
+ * @returns {any[]} merged chronological records
+ */
+function mergeRecords(batch, collected) {
+  if (collected.length === 0) return [...batch]
+  const seen = new Set(collected.map(seqOf))
+  const older = batch.filter(entry => !seen.has(seqOf(entry)))
+  return [...older, ...collected]
+}
+
+/**
+ * Join the text blocks of a message content array.
+ * @param content - content blocks
+ * @param maxChars - per-line character cap
+ * @returns {string} readable text, empty when the message has no text
+ */
+function textOfContent(content, maxChars) {
+  const blocks = Array.isArray(content) ? content : []
+  const text = blocks
+    .filter(block => block && block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+    .trim()
+  if (!text) return ''
+  return shorten(text, maxChars)
+}
+
+/**
+ * Render the read result.
+ * @param value - tool value
+ * @returns {string} model-facing text
+ */
+function renderRead(value) {
+  const title = value?.title || value?.session_id || ''
+  const head = `会话「${title}」｜${value?.session_id ?? ''}${value?.cwd ? `｜${value.cwd}` : ''}`
+  const messages = Array.isArray(value?.messages) ? value.messages : []
+  if (value?.at === 'search-miss') {
+    const lines = [
+      head,
+      `搜索未命中：在回看到的 ${value?.scanned ?? 0} 条可读消息里没有「${value?.query ?? ''}」`
+        + (value?.pages ? `（回溯 ${value.pages} 页）` : '') + '。',
+    ]
+    if (value?.more_before) lines.push('（只扫描到一部分历史；可以换更短的关键字，或先用 at:"head"/fromSeq 定位）')
+    return lines.join('\n')
+  }
+  if (value?.at === 'beyond') {
+    return [
+      head,
+      `序号 ${value?.from_seq ?? ''} 之后没有更多可读消息`
+        + `（本次工作窗里可读的最后一条是第 ${value?.last_seq ?? '?'} 条；更早的内容可以再往前读）。`,
+    ].join('\n')
+  }
+  const where = value?.at === 'head'
+    ? '从开头'
+    : value?.at === 'tail'
+      ? '从结尾'
+      : value?.at === 'search'
+        ? '从关键字命中处'
+        : '从指定序号'
+  const flags = []
+  if (value?.more_before) flags.push('前面还有更多')
+  if (value?.more_after) flags.push('后面还有更多')
+  const lines = [
+    head,
+    `${where}：本次 ${messages.length} 条消息（回看到 ${value?.scanned ?? 0} 条可读消息`
+      + (value?.pages ? `，回溯 ${value.pages} 页` : '') + '）'
+      + (flags.length ? `，${flags.join('，')}` : ''),
+    '',
+  ]
+  if (messages.length === 0) lines.push('（没有可读消息；它可能还是个空会话，或只有工具调用）')
+  for (const item of messages) lines.push(`[seq ${item.seq}｜${item.role}] ${item.text}`)
+  const last = messages[messages.length - 1]
+  if (last && value?.more_after) lines.push('', `继续往后读：fromSeq: ${last.seq + 1}`)
+  return lines.join('\n')
+}
 
 /**
  * Render the list result.
